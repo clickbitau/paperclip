@@ -1,3 +1,5 @@
+import type { createDeliveryWorkCoordinator } from "../delivery-work-coordinator.js";
+import { DELIVERY_QUEUES } from "../delivery-work-notifications.js";
 import { timeStartupRecovery } from "../../startup-recovery-timing.js";
 import type { Logger } from "pino";
 import type { heartbeatService } from "../heartbeat.js";
@@ -20,14 +22,45 @@ type StartupRecoveryHeartbeat = Pick<
 
 type StartupRecoveryLogger = Pick<Logger, "info" | "warn" | "error">;
 
+// Retain only failed startup obligations. The shared coordinator owns retry
+// deadlines, drain/resume and shutdown; successful recovery becomes quiet.
+export function registerStartupGoalRecoveryRetry(
+  coordinator: ReturnType<typeof createDeliveryWorkCoordinator>,
+  logger: StartupRecoveryLogger,
+  retryMs = 30_000,
+) {
+  const pending = new Map<string, () => Promise<unknown>>();
+  const worker = coordinator.register(DELIVERY_QUEUES.startupGoals, {
+    retryMs,
+    hasPending: async () => pending.size > 0,
+    run: async (signal) => {
+      for (const [name, run] of pending) {
+        if (signal.aborted) return;
+        try {
+          await run();
+          pending.delete(name);
+        } catch (err) {
+          logger.error({ err, step: name }, "startup goal recovery retry failed; work remains pending");
+        }
+      }
+    },
+  });
+  return (name: string, run: () => Promise<unknown>) => {
+    pending.set(name, run);
+    worker.wake();
+  };
+}
+
 // Startup recovery reads every open issue and run, so one bad row must not
 // stop the server from booting. If native ownership recovery fails, skip
 // further startup admission to avoid starting a provider twice. Keep the
 // server available for health and diagnosis. Later steps are isolated: the
-// next step runs, and the periodic scheduler retries the work on its next tick.
+// next step runs. Failed goal recovery is retained by the shared retry worker;
+// other phases have their existing periodic recovery backstops.
 export async function runStartupHeartbeatRecovery(
   heartbeat: StartupRecoveryHeartbeat,
   logger: StartupRecoveryLogger,
+  retryGoalRecovery?: (name: string, run: () => Promise<unknown>) => void,
 ) {
   try {
     const nativeRecovery = await timeStartupRecovery("native_recovery", () => heartbeat.recoverNativeRunsAfterRestart());
@@ -97,6 +130,9 @@ export async function runStartupHeartbeatRecovery(
         { err, step: name },
         "startup heartbeat recovery step failed; continuing with the next step",
       );
+      if (name === "recoverPendingSessionGoalActions" || name === "recoverActiveSessionGoals") {
+        retryGoalRecovery?.(name, run);
+      }
       return null;
     }
   };

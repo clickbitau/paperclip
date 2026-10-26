@@ -147,6 +147,37 @@ describeEmbeddedPostgres("ancestor blocks descendant", () => {
     await svc.update(otherId, { parentId: grandparentId });
   });
 
+  it("serializes blocker edits behind a concurrent subtree move", async () => {
+    const { companyId, grandparentId, parentId, otherId, insertIssue } = await seedTree();
+    const leafId = await insertIssue("Concurrent leaf", otherId);
+    let releaseMove!: () => void;
+    const holdMove = new Promise<void>(resolve => { releaseMove = resolve; });
+    let moved!: () => void;
+    const moveReady = new Promise<void>(resolve => { moved = resolve; });
+    const move = db.transaction(async tx => {
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${companyId}`}, 0))`);
+      await tx.update(issues).set({ parentId }).where(eq(issues.id, otherId));
+      moved();
+      await holdMove;
+    });
+    await moveReady;
+    const blocker = issueService(db).update(leafId, { blockedByIssueIds: [grandparentId] });
+    // Observe real lock contention rather than relying on promise timing.
+    // Attach rejection handling before releasing the concurrent transaction.
+    const outcome = blocker.then(() => null, error => error);
+    try {
+      await vi.waitFor(async () => {
+        const waiting = await db.execute(sql`select count(*)::int as count from pg_locks where locktype = 'advisory' and not granted`);
+        expect(Number(waiting[0]?.count)).toBeGreaterThan(0);
+      }, { timeout: 3_000, interval: 10 });
+    } finally {
+      releaseMove();
+      await move;
+    }
+    expect(await outcome).toMatchObject({ status: 422 });
+    expect(await blockersOf(leafId)).toEqual([]);
+  });
+
   it("startup recovery skips an issue whose seeded ancestor block would close a cycle", async () => {
     const { companyId, agentId, parentId, childId } = await seedTree();
     // Legacy bad data written before the write-time check: the parent blocks

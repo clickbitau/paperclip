@@ -49,6 +49,7 @@ export const DELIVERY_QUEUES = {
   routineSchedules: "routine-schedules",
   issueMonitors: "issue-monitors",
   caseHandoffs: "case-handoffs",
+  startupGoals: "startup-goal-recovery",
 } as const;
 export type DeliveryQueue = typeof DELIVERY_QUEUES[keyof typeof DELIVERY_QUEUES];
 

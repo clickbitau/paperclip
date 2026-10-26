@@ -1,4 +1,4 @@
-import { runStartupHeartbeatRecovery } from "./services/heartbeat/startup-recovery.js";
+import { registerStartupGoalRecoveryRetry, runStartupHeartbeatRecovery } from "./services/heartbeat/startup-recovery.js";
 import { registerEnvironmentCleanupWork } from "./services/environment-cleanup-work.js";
 import { loginCleanupSchedule } from "./services/login-cleanup-state.js";
 import { registerLoginCleanupWork } from "./services/login-cleanup-work.js";
@@ -1626,7 +1626,7 @@ async function startServerWithDatabaseTeardown(
         // Legacy remote recovery releases sandbox leases. Wait for provider
         // workers before cleanup or retry admission, including unmanaged installs.
         await timeStartupRecovery("plugin_workers", () => app.locals.bundledPluginsStartup);
-        await runStartupHeartbeatRecovery(heartbeat, logger);
+        await runStartupHeartbeatRecovery(heartbeat, logger, registerStartupGoalRecoveryRetry(deliveryWork, logger));
       })().catch((err) => {
         logger.error({ err }, "startup heartbeat recovery failed; server remains available");
       });
