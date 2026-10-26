@@ -376,7 +376,11 @@ describe("native same-conversation chat attachment reuse", () => {
       const setup = { step: "test" as const, testStartedAt: "2000-01-01T00:00:00.000Z", runtimeGeneration: 7 };
       await db.update(chatEndpoints).set({ status: "verifying", setup }).where(eq(chatEndpoints.id, endpointId));
       for (const delivery of deliveries) {
-        await db.update(chatDeliveries).set({ normalizedEvent: { runtimeContext: { generation, credentialFingerprint: fingerprint } } })
+        await db.update(chatDeliveries).set({
+          normalizedEvent: { runtimeContext: { generation, credentialFingerprint: fingerprint } },
+          receivedAt: new Date("2000-01-01T00:00:01.000Z"),
+          processedAt: new Date("2000-01-01T00:00:02.000Z"),
+        })
           .where(eq(chatDeliveries.id, delivery.id));
       }
       const result = db.transaction(tx => authorizeChatConversationForBoundRun(tx as unknown as typeof db,
@@ -386,7 +390,9 @@ describe("native same-conversation chat attachment reuse", () => {
     } finally {
       await db.update(chatEndpoints).set({ status: endpoint.status, setup: endpoint.setup }).where(eq(chatEndpoints.id, endpointId));
       for (const delivery of deliveries) {
-        await db.update(chatDeliveries).set({ normalizedEvent: delivery.normalizedEvent }).where(eq(chatDeliveries.id, delivery.id));
+        await db.update(chatDeliveries).set({ normalizedEvent: delivery.normalizedEvent,
+          receivedAt: delivery.receivedAt, processedAt: delivery.processedAt,
+        }).where(eq(chatDeliveries.id, delivery.id));
       }
     }
   });
