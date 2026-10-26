@@ -112,6 +112,17 @@ export type ExternalChatResponseWaitAuthorization =
 
 type AuthorizationLockMode = "blocking" | "nonblocking" | "read";
 
+type AuthorizationEndpoint = Pick<typeof chatEndpoints.$inferSelect,
+  "id" | "companyId" | "provider" | "providerAccountId" | "status" | "setup"
+  | "allowDirectMessages" | "allowGroupChats" | "allowUnlinkedPeople" | "sponsorUserId"
+>;
+type AuthorizationConversation = Pick<typeof chatConversations.$inferSelect,
+  "id" | "resourceId" | "isDirectMessage"
+>;
+type AuthorizationResource = Pick<typeof chatEndpointResources.$inferSelect,
+  "availability" | "type" | "enabled"
+>;
+
 class ExternalChatWaitAuthorizationContentionError extends Error {
   constructor() {
     super("paperclip_external_chat_wait_authorization_contended");
@@ -267,9 +278,9 @@ function decodeListCursor(
 }
 
 function destinationAllowed(
-  endpoint: typeof chatEndpoints.$inferSelect,
-  conversation: typeof chatConversations.$inferSelect,
-  resource: typeof chatEndpointResources.$inferSelect | null,
+  endpoint: AuthorizationEndpoint,
+  conversation: AuthorizationConversation,
+  resource: AuthorizationResource | null,
 ): boolean {
   if (conversation.isDirectMessage) return endpoint.allowDirectMessages;
   if (!resource || resource.availability !== "available") return false;
@@ -283,7 +294,7 @@ function destinationAllowed(
 }
 
 function currentSetupTestAcceptsBoundDeliveries(
-  endpoint: typeof chatEndpoints.$inferSelect,
+  endpoint: AuthorizationEndpoint,
   deliveries: Array<{
     normalizedEvent: unknown;
     processedAt: Date | null;
@@ -326,7 +337,7 @@ function currentSetupTestAcceptsBoundDeliveries(
 
 async function principalAuthorized(
   tx: Db,
-  endpoint: typeof chatEndpoints.$inferSelect,
+  endpoint: AuthorizationEndpoint,
   principalId: string,
   lockMode: AuthorizationLockMode = "blocking",
 ): Promise<boolean> {
@@ -445,10 +456,32 @@ export async function authorizeChatConversationForBoundRun(
   const linksQuery = tx
     .select({
       commentId: chatMessageLinks.commentId,
-      conversation: chatConversations,
-      endpoint: chatEndpoints,
+      conversation: {
+        id: chatConversations.id,
+        resourceId: chatConversations.resourceId,
+        isDirectMessage: chatConversations.isDirectMessage,
+      },
+      endpoint: {
+        id: chatEndpoints.id,
+        companyId: chatEndpoints.companyId,
+        provider: chatEndpoints.provider,
+        providerAccountId: chatEndpoints.providerAccountId,
+        status: chatEndpoints.status,
+        allowDirectMessages: chatEndpoints.allowDirectMessages,
+        allowGroupChats: chatEndpoints.allowGroupChats,
+        allowUnlinkedPeople: chatEndpoints.allowUnlinkedPeople,
+        sponsorUserId: chatEndpoints.sponsorUserId,
+        setup: sql<AuthorizationEndpoint["setup"]>`jsonb_build_object(
+          'step', ${chatEndpoints.setup}->'step',
+          'testStartedAt', ${chatEndpoints.setup}->'testStartedAt',
+          'runtimeGeneration', ${chatEndpoints.setup}->'runtimeGeneration'
+        )`,
+      },
       principalId: chatDeliveries.principalId,
-      normalizedEvent: chatDeliveries.normalizedEvent,
+      normalizedEvent: sql<unknown>`jsonb_build_object('runtimeContext', jsonb_build_object(
+        'generation', ${chatDeliveries.normalizedEvent}->'runtimeContext'->'generation',
+        'credentialFingerprint', ${chatDeliveries.normalizedEvent}->'runtimeContext'->'credentialFingerprint'
+      ))`,
       processedAt: chatDeliveries.processedAt,
       receivedAt: chatDeliveries.receivedAt,
     })
@@ -518,7 +551,11 @@ export async function authorizeChatConversationForBoundRun(
   const resource = conversation.resourceId
     ? await (() => {
         const query = tx
-          .select()
+          .select({
+            availability: chatEndpointResources.availability,
+            type: chatEndpointResources.type,
+            enabled: chatEndpointResources.enabled,
+          })
           .from(chatEndpointResources)
           .where(
             and(
