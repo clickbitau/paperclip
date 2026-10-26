@@ -178,6 +178,66 @@ describeEmbeddedPostgres("ancestor blocks descendant", () => {
     expect(await blockersOf(leafId)).toEqual([]);
   });
 
+  it("serializes createChild blocker validation behind a concurrent tree move", async () => {
+    const { companyId, parentId } = await seedTree();
+    let childCreated!: () => void;
+    const created = new Promise<void>(resolve => { childCreated = resolve; });
+    let resumeChild!: () => void;
+    const resume = new Promise<void>(resolve => { resumeChild = resolve; });
+    let firstTransaction = true;
+    // Pause after create() commits the new child, before createChild adds its
+    // parent blocker. All database operations still use real PostgreSQL.
+    const pausedDb = new Proxy(db, {
+      get(target, property) {
+        if (property === "transaction") return async (...args: Parameters<typeof db.transaction>) => {
+          const pause = firstTransaction;
+          firstTransaction = false;
+          const result = await target.transaction(...args);
+          if (pause) {
+            childCreated();
+            await resume;
+          }
+          return result;
+        };
+        const value = Reflect.get(target, property);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const outcome = issueService(pausedDb).createChild(parentId, {
+      title: "Concurrent helper child", status: "todo", blockParentUntilDone: true,
+    }).then(() => null, error => error);
+    let releaseMove!: () => void;
+    const holdMove = new Promise<void>(resolve => { releaseMove = resolve; });
+    let move: Promise<unknown> | undefined;
+    try {
+      await created;
+      const [child] = await db.select({ id: issues.id }).from(issues)
+        .where(and(eq(issues.companyId, companyId), eq(issues.title, "Concurrent helper child")));
+      expect(child).toBeDefined();
+      let moved!: () => void;
+      const moveReady = new Promise<void>(resolve => { moved = resolve; });
+      move = db.transaction(async tx => {
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${companyId}`}, 0))`);
+        await tx.update(issues).set({ parentId: null }).where(eq(issues.id, child!.id));
+        await tx.update(issues).set({ parentId: child!.id }).where(eq(issues.id, parentId));
+        moved();
+        await holdMove;
+      });
+      await moveReady;
+      resumeChild();
+      await vi.waitFor(async () => {
+        const waiting = await db.execute(sql`select count(*)::int as count from pg_locks where locktype = 'advisory' and not granted`);
+        expect(Number(waiting[0]?.count)).toBeGreaterThan(0);
+      }, { timeout: 3_000, interval: 10 });
+    } finally {
+      resumeChild();
+      releaseMove?.();
+      await move;
+    }
+    expect(await outcome).toMatchObject({ status: 422 });
+    expect(await blockersOf(parentId)).toEqual([]);
+  });
+
   it("startup recovery skips an issue whose seeded ancestor block would close a cycle", async () => {
     const { companyId, agentId, parentId, childId } = await seedTree();
     // Legacy bad data written before the write-time check: the parent blocks
