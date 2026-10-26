@@ -3380,3 +3380,14 @@ in `_test` for `PAPERCLIP_MCP_SLEEP_TEST_DATABASE_URL`,
 `PAPERCLIP_DOT_RUNNER_TEST_DATABASE_URL`. The interaction-service regression suite
 also accepts `PAPERCLIP_INTERACTIONS_TEST_DATABASE_URL`. The suites migrate and write to those
 URLs; the sleep suite truncates company data between tests.
+
+### Recovery and issue-tree safety
+
+Startup heartbeat recovery logs individual issue failures and continues with
+other issues. A failed recovery phase does not terminate the HTTP server.
+If native ownership recovery fails, startup skips later admission phases.
+The existing scheduler remains responsible for later reconciliation.
+
+Blocking relations cannot make an ancestor block its descendant. The issue
+service rejects these writes with HTTP 422, including reparenting that would
+make an existing relation invalid. A child can still block its parent.

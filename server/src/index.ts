@@ -1,3 +1,4 @@
+import { runStartupHeartbeatRecovery } from "./services/heartbeat/startup-recovery.js";
 import { registerEnvironmentCleanupWork } from "./services/environment-cleanup-work.js";
 import { loginCleanupSchedule } from "./services/login-cleanup-state.js";
 import { registerLoginCleanupWork } from "./services/login-cleanup-work.js";
@@ -1625,129 +1626,9 @@ async function startServerWithDatabaseTeardown(
         // Legacy remote recovery releases sandbox leases. Wait for provider
         // workers before cleanup or retry admission, including unmanaged installs.
         await timeStartupRecovery("plugin_workers", () => app.locals.bundledPluginsStartup);
-        try {
-          const nativeRecovery = await timeStartupRecovery("native_recovery", () => heartbeat.recoverNativeRunsAfterRestart());
-          if (nativeRecovery.dispositions.length > 0) {
-            logger.info(
-              {
-                restartKind: nativeRecovery.restartKind,
-                claims: nativeRecovery.claims.map((claim) => ({
-                  runId: claim.runId,
-                  disposition: claim.kind,
-                  controllerGeneration: claim.controllerGeneration,
-                })),
-                awaitingEvidenceRunIds:
-                  nativeRecovery.awaitingEvidenceRunIds,
-                blockedRunIds: nativeRecovery.blockedRunIds,
-              },
-              "startup native runner restart recovery classified",
-            );
-          }
-        } catch (err) {
-          logger.error(
-            { err },
-            "startup native runner restart recovery failed closed",
-          );
-          throw err;
-        }
-        try {
-          const hotRestart = await timeStartupRecovery("hot_restart", () => heartbeat.reconcileHotRestartAdoption());
-          if (hotRestart.mode === "reported") {
-            logger.info(
-              hotRestart,
-              "startup hot-restart adoption reconciliation complete",
-            );
-          }
-        } catch (err) {
-          logger.error(
-            { err },
-            "startup hot-restart adoption reconciliation failed - orphan reaper will serve as degraded backstop",
-          );
-        }
-
-        for (let attempt = 1; attempt <= 2; attempt++) {
-          try {
-            const result = await timeStartupRecovery("orphan_reaping", () => heartbeat.reapOrphanedRuns());
-            logger.info(
-              { reaped: result.reaped, runIds: result.runIds },
-              "startup reap of orphaned heartbeat runs complete",
-            );
-            break;
-          } catch (err) {
-            if (attempt < 2) {
-              logger.warn({ err, attempt }, "startup reap failed, retrying");
-            } else {
-              logger.error(
-                { err },
-                "startup reap of orphaned heartbeat runs failed after retry - periodic reaper will serve as degraded backstop",
-              );
-            }
-          }
-        }
-
-        const promotion = await timeStartupRecovery("scheduled_retries", () => heartbeat.promoteDueScheduledRetries());
-        await timeStartupRecovery("queued_runs", () => heartbeat.resumeQueuedRuns());
-        const recoveredGoalActions = await timeStartupRecovery("goal_actions", () => heartbeat.recoverPendingSessionGoalActions());
-        if (
-          recoveredGoalActions.enqueued > 0 ||
-          recoveredGoalActions.invalid > 0
-        ) {
-          logger.warn(
-            recoveredGoalActions,
-            "startup session-goal action outbox recovery reconciled pending controls",
-          );
-        }
-        const recoveredGoals = await timeStartupRecovery("active_goals", () => heartbeat.recoverActiveSessionGoals());
-        if (recoveredGoals.enqueued > 0) {
-          logger.warn(
-            recoveredGoals,
-            "startup session-goal recovery resumed durable agent goals",
-          );
-        }
-        const reconciled = await heartbeat.reconcileStrandedAssignedIssues();
-        if (
-          promotion.promoted > 0 ||
-          reconciled.assignmentDispatched > 0 ||
-          reconciled.dispatchRequeued > 0 ||
-          reconciled.continuationRequeued > 0 ||
-          reconciled.successfulRunHandoffEscalated > 0 ||
-          reconciled.successfulRunHandoffRetried > 0 ||
-          reconciled.escalated > 0
-        ) {
-          logger.warn(
-            { promotedScheduledRetries: promotion.promoted, promotedScheduledRetryRunIds: promotion.runIds, ...reconciled },
-            "startup heartbeat recovery changed assigned issue state",
-          );
-        }
-
-        const dependencyWakesReconciled = await heartbeat.reconcileResolvedDependencyWakes();
-        if (dependencyWakesReconciled.healed > 0) {
-          logger.warn(
-            { ...dependencyWakesReconciled },
-            "startup dependency-wake reconciliation restored task execution paths",
-          );
-        }
-
-        const taskWatchdogsReconciled = await heartbeat.reconcileTaskWatchdogs();
-        if (taskWatchdogsReconciled.triggered > 0) {
-          logger.warn(
-            { ...taskWatchdogsReconciled },
-            "startup task-watchdog reconciliation triggered watchdog work",
-          );
-        }
-
-        const scanned = await heartbeat.scanSilentActiveRuns();
-        if (scanned.created > 0 || scanned.escalated > 0) {
-          logger.warn({ ...scanned }, "startup active-run output watchdog created review work");
-        }
-
-        const swept = await heartbeat.sweepStaleIssueLocks();
-        if (swept.cleared > 0) {
-          logger.warn({ ...swept }, "startup stale-lock sweeper cleared issue locks");
-        }
+        await runStartupHeartbeatRecovery(heartbeat, logger);
       })().catch((err) => {
-        logger.error({ err }, "startup heartbeat recovery failed");
-        throw err;
+        logger.error({ err }, "startup heartbeat recovery failed; server remains available");
       });
       trackHeartbeatSchedulerWork(startupHeartbeatRecovery);
       await startupHeartbeatRecovery;

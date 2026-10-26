@@ -7534,6 +7534,98 @@ export function issueService(db: Db) {
     }
   }
 
+  // A parent's work includes its children, so an ancestor that blocks one of
+  // its own descendants can never be unblocked: recovery marks the parent
+  // blocked by its open children, which closes a blocking cycle. A child may
+  // still block its parent.
+  function ancestorIssueIdsSql(companyId: string, issueId: string) {
+    return sql`
+      WITH RECURSIVE ancestors(id) AS (
+        SELECT ${issues.parentId}
+        FROM ${issues}
+        WHERE ${issues.companyId} = ${companyId}
+          AND ${issues.id} = ${issueId}
+        UNION
+        SELECT ${issues.parentId}
+        FROM ${issues}
+        JOIN ancestors ON ${issues.id} = ancestors.id
+        WHERE ${issues.companyId} = ${companyId}
+      )
+      SELECT id FROM ancestors WHERE id IS NOT NULL
+    `;
+  }
+
+  async function assertNoAncestorBlockers(
+    companyId: string,
+    issueId: string,
+    blockerIssueIds: string[],
+    dbOrTx: DbReader = db,
+  ) {
+    if (blockerIssueIds.length === 0) return;
+    const ancestorBlocker = await dbOrTx
+      .select({ id: issues.id })
+      .from(issues)
+      .where(
+        and(
+          eq(issues.companyId, companyId),
+          inArray(issues.id, blockerIssueIds),
+          sql<boolean>`${issues.id} IN (${ancestorIssueIdsSql(companyId, issueId)})`,
+        ),
+      )
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    if (ancestorBlocker) {
+      throw unprocessable(
+        "An issue cannot be blocked by its own parent or ancestor; a child may block its parent instead",
+        { issueId, blockerIssueId: ancestorBlocker.id },
+      );
+    }
+  }
+
+  // Moving an issue under a new parent must not turn an existing blocker into
+  // an ancestor of the issue or of anything beneath it.
+  async function assertNoAncestorBlocksSubtree(
+    companyId: string,
+    subtreeRootId: string,
+    dbOrTx: DbReader = db,
+  ) {
+    const offending = await dbOrTx
+      .select({
+        blockerIssueId: issueRelations.issueId,
+        blockedIssueId: issueRelations.relatedIssueId,
+      })
+      .from(issueRelations)
+      .where(
+        and(
+          eq(issueRelations.companyId, companyId),
+          eq(issueRelations.type, "blocks"),
+          sql<boolean>`${issueRelations.issueId} IN (${ancestorIssueIdsSql(companyId, subtreeRootId)})`,
+          sql<boolean>`${issueRelations.relatedIssueId} IN (
+            WITH RECURSIVE subtree(id) AS (
+              SELECT ${issues.id}
+              FROM ${issues}
+              WHERE ${issues.companyId} = ${companyId}
+                AND ${issues.id} = ${subtreeRootId}
+              UNION
+              SELECT ${issues.id}
+              FROM ${issues}
+              JOIN subtree ON ${issues.parentId} = subtree.id
+              WHERE ${issues.companyId} = ${companyId}
+            )
+            SELECT id FROM subtree
+          )`,
+        ),
+      )
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    if (offending) {
+      throw unprocessable(
+        "An issue cannot be blocked by its own parent or ancestor; a child may block its parent instead",
+        offending,
+      );
+    }
+  }
+
   async function syncBlockedByIssueIds(
     issueId: string,
     companyId: string,
@@ -7565,6 +7657,7 @@ export function issueService(db: Db) {
           "Blocked-by issues must belong to the same company",
         );
       }
+      await assertNoAncestorBlockers(companyId, issueId, deduped, dbOrTx);
       await assertNoBlockingCycles(companyId, issueId, deduped, dbOrTx);
     }
 
@@ -11530,6 +11623,9 @@ export function issueService(db: Db) {
             },
             tx,
           );
+        }
+        if (updated.parentId && updated.parentId !== existing.parentId) {
+          await assertNoAncestorBlocksSubtree(existing.companyId, updated.id, tx);
         }
         if (
           issueData.executionWorkspaceSettings !== undefined &&
