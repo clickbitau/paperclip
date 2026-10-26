@@ -987,7 +987,7 @@ describe("startServer feedback export wiring", () => {
     expect(heartbeatServiceMock.reapOrphanedRuns).toHaveBeenCalledTimes(2);
   });
 
-  it("closes the bound listener when native startup recovery fails", async () => {
+  it("keeps the bound listener available and skips admission when native startup recovery fails", async () => {
     loadConfigMock.mockReturnValue(buildTestConfig({
       heartbeatSchedulerEnabled: true,
       heartbeatSchedulerIntervalMs: 30000,
@@ -996,10 +996,16 @@ describe("startServer feedback export wiring", () => {
       new Error("native recovery unavailable"),
     );
 
-    await expect(startServer()).rejects.toThrow("native recovery unavailable");
+    await expect(startServer()).resolves.toBeDefined();
 
     expect(fakeServer.listen).toHaveBeenCalledTimes(1);
-    expect(fakeServer.close).toHaveBeenCalledTimes(1);
+    expect(fakeServer.close).not.toHaveBeenCalled();
+    expect(heartbeatServiceMock.promoteDueScheduledRetries).not.toHaveBeenCalled();
+    expect(heartbeatServiceMock.resumeQueuedRuns).not.toHaveBeenCalled();
+    expect(vi.mocked(logger.error)).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error) }),
+      "startup native runner restart recovery failed closed",
+    );
   });
 
   it("refuses authenticated public startup without an external database URL", async () => {
